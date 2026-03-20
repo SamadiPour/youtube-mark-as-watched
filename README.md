@@ -1,4 +1,4 @@
-# yt-mark-as-watched
+# YouTube Mark as Watched
 
 A userscript that adds a "Mark as watched" control button to YouTube thumbnails.
 

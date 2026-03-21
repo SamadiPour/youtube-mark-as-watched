@@ -5,6 +5,8 @@ A userscript that adds a "Mark as watched" control button to YouTube thumbnails.
 The script is designed to blend into YouTube's existing UI. The control appears in YouTube's hover action column and
 follows the same interaction pattern as the built-in thumbnail actions.
 
+<img src="https://github.com/user-attachments/assets/7c10ee3e-ee9b-4bd7-a072-9a1e952b7e1e" width="500" />
+
 ## Installation
 
 1. Install a userscript manager in your browser. (such as Tampermonkey or Violentmonkey)

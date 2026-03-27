@@ -3,7 +3,7 @@
 // @description  Allows users to mark a video as fully watched
 // @namespace    https://github.com/SamadiPour/youtube-mark-as-watched
 // @author       Amir Hossein SamadiPour
-// @version      1.1.0
+// @version      1.2.0
 // @license      GNU General Public License v3.0
 // @match        https://www.youtube.com/*
 // @grant        none
@@ -14,7 +14,7 @@
   'use strict';
 
   // ---------------------------------------------------------------------------
-  // Global CSS – style the action like YouTube's hover overlay controls
+  // Global CSS
   // ---------------------------------------------------------------------------
   const style = document.createElement('style');
   style.textContent = `
@@ -47,8 +47,37 @@
     }
     @keyframes maw-spin {
       from { transform: rotate(0deg); }
-      to { transform: rotate(360deg); }
+      to   { transform: rotate(360deg); }
     }
+
+    /* Fallback hover overlay */
+    .maw-custom-overlay {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      z-index: 50;
+      display: none;
+      align-items: center;
+      pointer-events: none;
+    }
+    .maw-fallback-action button {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: rgba(0, 0, 0, 0.65);
+      color: #fff;
+      border: none;
+      padding: 3px;
+      box-sizing: border-box;
+    }
+    .maw-fallback-action svg {
+      fill: currentColor;
+    }
+    .maw-fallback-action button:not(:disabled):hover {
+      background: rgba(0, 0, 0, 0.85);
+    }
+    .maw-fallback-action.done button { color: #22c55e; }
+    .maw-fallback-action.err button  { color: #ef4444; }
   `;
   document.head.appendChild(style);
 
@@ -79,17 +108,10 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Core: fetch vm/of tokens then fire the playback-complete ping
+  // Core: fetch tracking URL then fire the playback-complete ping
   // ---------------------------------------------------------------------------
 
   async function fetchPlaybackUrl(videoId) {
-    // // Fast path: player response already on the page (watch page, no fetch needed)
-    // const ipr = window.ytInitialPlayerResponse;
-    // if (ipr?.videoDetails?.videoId === videoId) {
-    //   const url = ipr?.playbackTracking?.videostatsPlaybackUrl?.baseUrl;
-    //   if (url) return url;
-    // }
-
     // Fetch the watch page and extract from embedded ytInitialPlayerResponse JSON
     const resp = await fetch(`/watch?v=${videoId}`, {credentials: 'include'});
     if (!resp.ok) return null;
@@ -137,8 +159,12 @@
 
   const BTN_SELECTOR = '.maw-native-action';
   const HOVER_HOST_SELECTOR = 'yt-thumbnail-hover-overlay-toggle-actions-view-model.ytThumbnailHoverOverlayToggleActionsViewModelHost';
+  const NATIVE_BTN_SELECTOR = HOVER_HOST_SELECTOR + ' ' + BTN_SELECTOR;
+  const THUMB_ANCHOR_SELECTOR = 'a.yt-lockup-view-model__content-image[href*="/watch?v="], a#thumbnail[href*="/watch?v="]';
+  const FALLBACK_OVERLAY_CLASS = 'maw-custom-overlay';
   const hostObservers = new WeakMap();
   const scheduledHosts = new WeakSet();
+  const attachedFallbacks = new WeakSet();
 
   function getVideoIdFromUrl(url) {
     return url.match(/[?&]v=([\w-]{11})/)?.[1] || null;
@@ -165,15 +191,12 @@
 
     const observer = new MutationObserver(() => {
       if (!host.isConnected) return;
-      if (!host.querySelector(BTN_SELECTOR)) {
-        scheduleHostAttach(host);
-      }
+      if (!host.querySelector(BTN_SELECTOR)) scheduleHostAttach(host);
     });
 
     observer.observe(host, {childList: true, subtree: false});
     hostObservers.set(host, observer);
   }
-
 
   function markThumbnailDone(thumbAnchor) {
     const root = getThumbnailRoot(thumbAnchor);
@@ -228,15 +251,11 @@
     if (overlays && !overlays.querySelector('#progress')) {
       const bar = document.createElement('div');
       bar.className = 'style-scope ytd-thumbnail';
-      bar.style.display = 'block';
-      bar.style.position = 'absolute';
-      bar.style.bottom = '0';
-      bar.style.right = '0';
-      bar.style.left = '0';
-      bar.style.height = '4px';
-      bar.style.backgroundColor = 'var(--yt-spec-text-disabled)';
-      bar.style.zIndex = '1';
-
+      Object.assign(bar.style, {
+        display: 'block', position: 'absolute',
+        bottom: '0', right: '0', left: '0',
+        height: '4px', backgroundColor: 'var(--yt-spec-text-disabled)', zIndex: '1',
+      });
       const progressBar = document.createElement('div');
       progressBar.id = 'progress';
       progressBar.className = 'style-scope ytd-thumbnail-overlay-resume-playback-renderer';
@@ -244,7 +263,6 @@
 
       bar.appendChild(progressBar);
       overlays.appendChild(bar);
-      return;
     }
   }
 
@@ -297,6 +315,7 @@
     replaceIcon('M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z');
   }
 
+  // Native path: inject into YouTube's own hover panel when it exists and is usable
   function attachButton(overlayHost) {
     if (!overlayHost) return;
     observeHoverHost(overlayHost);
@@ -325,6 +344,7 @@
     button.setAttribute('aria-disabled', 'false');
     button.setAttribute('aria-label', 'Mark as watched');
     setButtonIcon(button, 'idle');
+
     button.addEventListener('click', async (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -338,9 +358,7 @@
         setButtonIcon(button, 'done');
         wrapper.className = 'ytThumbnailHoverOverlayToggleActionsViewModelButton maw-native-action done';
         markThumbnailDone(thumbAnchor);
-        setTimeout(() => {
-          wrapper.remove();
-        }, 1200);
+        setTimeout(() => wrapper.remove(), 1200);
       } catch (err) {
         console.error('[maw]', err);
         setButtonIcon(button, 'error');
@@ -357,10 +375,107 @@
     overlayHost.appendChild(wrapper);
   }
 
+  // Fallback path: build our own hover overlay when the native panel is absent or unusable.
+  // The overlay is created lazily on first hover so it always reads a fully-rendered DOM.
+  // Listeners are attached to thumbAnchor so mouseleave never fires while clicking the button.
+  function attachFallbackButton(thumbAnchor) {
+    if (attachedFallbacks.has(thumbAnchor)) return;
+    attachedFallbacks.add(thumbAnchor);
+
+    if (getComputedStyle(thumbAnchor).position === 'static') {
+      thumbAnchor.style.position = 'relative';
+    }
+
+    function getOrCreateOverlay() {
+      const videoId = getVideoIdFromUrl(thumbAnchor.href);
+      if (!videoId || isThumbnailWatched(thumbAnchor)) return null;
+
+      const existing = thumbAnchor.querySelector('.' + FALLBACK_OVERLAY_CLASS);
+      if (existing) return existing;
+
+      const overlay = document.createElement('div');
+      overlay.className = FALLBACK_OVERLAY_CLASS;
+
+      const wrapper = document.createElement('div');
+      wrapper.className = 'maw-native-action maw-fallback-action';
+
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.setAttribute('aria-label', 'Mark as watched');
+      button.setAttribute('aria-disabled', 'false');
+
+      const iconHost = document.createElement('div');
+      button._mawIconHost = iconHost;
+      button.appendChild(iconHost);
+      setButtonIcon(button, 'idle');
+
+      button.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        button.blur();
+        setButtonIcon(button, 'loading');
+        button.disabled = true;
+        button.setAttribute('aria-disabled', 'true');
+        wrapper.className = 'maw-native-action maw-fallback-action';
+        try {
+          await markAsWatched(videoId);
+          setButtonIcon(button, 'done');
+          wrapper.className = 'maw-native-action maw-fallback-action done';
+          markThumbnailDone(thumbAnchor);
+          setTimeout(() => wrapper.remove(), 1200);
+        } catch (err) {
+          console.error('[maw]', err);
+          setButtonIcon(button, 'error');
+          wrapper.className = 'maw-native-action maw-fallback-action err';
+          setTimeout(() => {
+            setButtonIcon(button, 'idle');
+            wrapper.className = 'maw-native-action maw-fallback-action';
+            button.disabled = false;
+            button.setAttribute('aria-disabled', 'false');
+          }, 2500);
+        }
+      });
+
+      wrapper.appendChild(button);
+      overlay.appendChild(wrapper);
+      thumbAnchor.appendChild(overlay);
+      return overlay;
+    }
+
+    function showOverlay() {
+      const overlay = getOrCreateOverlay();
+      if (overlay) {
+        overlay.style.display = 'flex';
+        overlay.style.pointerEvents = 'auto';
+      }
+    }
+
+    thumbAnchor.addEventListener('mouseenter', showOverlay);
+
+    thumbAnchor.addEventListener('mouseleave', () => {
+      const overlay = thumbAnchor.querySelector('.' + FALLBACK_OVERLAY_CLASS);
+      if (overlay) {
+        overlay.style.display = 'none';
+        overlay.style.pointerEvents = 'none';
+      }
+    });
+
+    // Show immediately if the cursor is already inside (e.g. triggered via mousemove)
+    if (thumbAnchor.matches(':hover')) showOverlay();
+  }
+
+  function needsFallback(thumbAnchor) {
+    return !thumbAnchor.querySelector(NATIVE_BTN_SELECTOR);
+  }
+
   function scanPage() {
     document.querySelectorAll(HOVER_HOST_SELECTOR).forEach((host) => {
       observeHoverHost(host);
       attachButton(host);
+    });
+
+    document.querySelectorAll(THUMB_ANCHOR_SELECTOR).forEach((thumbAnchor) => {
+      if (needsFallback(thumbAnchor)) attachFallbackButton(thumbAnchor);
     });
   }
 
@@ -429,6 +544,16 @@
     schedule();
   });
 
+  // Catch-all for thumbnails missed by the observer:
+  // – hover panel injected lazily by YouTube (hasHoverHost but nativeInjected=false)
+  // – href set via attribute change after element was added (not a childList mutation)
+  // – element replaced by framework hydration mid-hover
+  document.addEventListener('mousemove', (e) => {
+    const thumbAnchor = e.target.closest?.(THUMB_ANCHOR_SELECTOR);
+    if (!thumbAnchor || attachedFallbacks.has(thumbAnchor)) return;
+    if (needsFallback(thumbAnchor)) attachFallbackButton(thumbAnchor);
+  }, {passive: true});
+
   new MutationObserver((mutations) => {
     let shouldSchedule = false;
 
@@ -449,6 +574,7 @@
 
         if (
           node.matches?.('ytd-rich-item-renderer, ytd-grid-video-renderer, ytd-video-renderer, ytd-compact-video-renderer, yt-lockup-view-model, ytd-playlist-video-renderer')
+          || node.matches?.(THUMB_ANCHOR_SELECTOR)
           || node.querySelector?.('a.yt-lockup-view-model__content-image[href*="/watch?v="], a#thumbnail[href*="/watch?v="]')
         ) {
           shouldSchedule = true;
